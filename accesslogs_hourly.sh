@@ -1,31 +1,43 @@
 #!/bin/bash
 #Hourly access log roll-ups to Hive
-#do-as-hosting crontab -e
 
-#echo "Renewing kerberos token"
-#kinit -R -k -t /home/cbrickner/kerberos/cbrickner.keytab cbrickner@DC1.CORP.GD
+processTimeFile="/home/user/states/access_hourly.state"
+logFile="/home/user/logs/access_hourly.log"
+email="user@domain.com"
 
-processTimeFile="/home/cbrickner/pig/access_hourly.state"
+function lockFile {
+    mv "$processTimeFile" "$processTimeFile.lock"
+}
 
-if [ ! -f "$processTimeFile" ]; then
-    echo "Can not find $processTimeFile."
-    exit 1
-else
-    processTime=$(date --date="$(sed 's/T/ /' $processTimeFile)" '+%Y-%m-%d %H:00')
-fi
+function unlockFile {
+    mv "$processTimeFile.lock" "$processTimeFile"
+}
 
-if [ -z "$processTime" ]; then
-    echo "The last process time cannot be read."
-    exit 1
-else
-    processTime=$(date --date="$processTime 60 minutes" '+%Y-%m-%d %H:00 %z')
-fi
+function setProcessTime {
+    if [ ! -f "$processTimeFile" ]; then
+        echo "Can not find $processTimeFile." | mail -s "Access Hourly Job State File Missing" -r hosting-hadoop-noreply@`hostname -f` $email 2>> $logFile
+        exit 1
+    else
+        processTime=$(date --date="$(cat $processTimeFile)" '+%Y-%m-%d %H:00 %z')
+        processSeconds=$(date --date="$processTime" '+%s')
+    fi
 
-/usr/local/bin/do-as-hosting pig -stop_on_failure -useHCatalog -param PROCESSTIME="$processTime" /home/cbrickner/pig/accesslogs_hive_job_combined_hourly.pig
+    if [ -z "$processTime" ]; then
+        echo "The process time cannot be read." | mail -s "Access Hourly Job Time Corrupt" -r hosting-hadoop-noreply@`hostname -f` $email 2>> $logFile
+        exit 1
+    fi
+}
+
+setProcessTime
+lockFile
+
+pig -stop_on_failure -useHCatalog -param PROCESSTIME="$processTime" /home/user/pig/accesslogs_hive_job_combined_hourly.pig
+
+unlockFile
 
 if [ $? -eq 0 ]; then
     printf "$processTime\n" > $processTimeFile
 else
-    echo "The Pig script did not process correctly for $processTime."
+    echo "The Pig script did not process correctly for $processTime." | mail -s "Access Hourly Pig Script Update Failed" -r hosting-hadoop-noreply@`hostname -f` $email 2>> $logFile
     exit 1
 fi
