@@ -1,9 +1,11 @@
 #!/bin/bash
 #Hourly access log roll-ups to Hive
 
+jobName="Access Hourly"
 processTimeFile="/home/user/states/access_hourly.state"
 logFile="/home/user/logs/access_hourly.log"
 email="user@domain.com"
+pigScript="/home/user/pig/accesslogs_hive_job_combined_hourly.pig"
 
 function lockFile {
     mv "$processTimeFile" "$processTimeFile.lock"
@@ -13,31 +15,81 @@ function unlockFile {
     mv "$processTimeFile.lock" "$processTimeFile"
 }
 
-function setProcessTime {
-    if [ ! -f "$processTimeFile" ]; then
-        echo "Can not find $processTimeFile." | mail -s "Access Hourly Job State File Missing" -r hosting-hadoop-noreply@`hostname -f` $email 2>> $logFile
-        exit 1
+function checkProcessTime {
+    if [ -z "$processTime" ]; then
+        echo "The process time cannot be read, try $errorCounter." | mail -s "$jobName Job Time Corrupt" -r hosting-hadoop-noreply@`hostname -f` $email 2>> $logFile
+        return 1
     else
-        processTime=$(date --date="$(cat $processTimeFile)" '+%Y-%m-%d %H:00 %z')
-        processSeconds=$(date --date="$processTime" '+%s')
+        return 0
     fi
 
-    if [ -z "$processTime" ]; then
-        echo "The process time cannot be read." | mail -s "Access Hourly Job Time Corrupt" -r hosting-hadoop-noreply@`hostname -f` $email 2>> $logFile
-        exit 1
+}
+
+function readTimeFile {
+    if [ ! -f "$processTimeFile" ]; then
+        echo "Can not find $processTimeFile, try $errorCounter." | mail -s "$jobName Job State File Missing" -r hosting-hadoop-noreply@`hostname -f` $email 2>> $logFile
+        return 1
+    else
+        return 0
+    fi
+}
+
+function setProcessTime {
+    errorCounter=0
+
+    while [ $errorCounter -lt 7 ];
+    do
+        readTimeFile
+        if [ $? -eq 0 ]; then
+            processTime=$(date --date="$(cat $processTimeFile)" '+%Y-%m-%d %H:00 %z')
+            checkProcessTime
+            if [ $? -eq 0 ]; then
+                break
+            else
+                sleep 180
+            fi
+        else
+            sleep 180
+        fi
+        errorCounter=$[$errorCounter + 1]
+    done
+
+    if [ $errorCounter -lt 7 ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+function runPigScript {
+    errorCounter=0
+
+    while [ $errorCounter -lt 7 ];
+    do
+        pig -stop_on_failure -useHCatalog -param PROCESSTIME="$processTime" $pigScript
+        if [ $? -eq 0 ]; then
+            processTime=$(date --date="$processTime 60 minutes" '+%Y-%m-%d %H:00 %z')
+            printf "$processTime\n" > "$processTimeFile.lock"
+            break
+        else
+            echo "The script did not process correctly for $processTime, try $errorCounter." | mail -s "$jobName Pig Script Update Failed" -r hosting-hadoop-noreply@`hostname -f` $email 2>> $logFile
+            sleep 180
+        fi
+        errorCounter=$[$errorCounter + 1]
+    done
+
+    if [ $errorCounter -lt 7 ]; then
+        return 0
+    else
+        return 1
     fi
 }
 
 setProcessTime
-lockFile
-
-pig -stop_on_failure -useHCatalog -param PROCESSTIME="$processTime" /home/user/pig/accesslogs_hive_job_combined_hourly.pig
-
-unlockFile
-
 if [ $? -eq 0 ]; then
-    printf "$processTime\n" > $processTimeFile
-else
-    echo "The Pig script did not process correctly for $processTime." | mail -s "Access Hourly Pig Script Update Failed" -r hosting-hadoop-noreply@`hostname -f` $email 2>> $logFile
-    exit 1
+    lockFile
+    runPigScript
+    if [ $? -eq 0 ]; then
+        unlockFile
+    fi
 fi
