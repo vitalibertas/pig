@@ -33,7 +33,7 @@ pluginMap = FOREACH wordpressData {
   ,(int)json#'num_posts'                                 AS number_posts
   ,(int)json#'num_users'                                 AS number_users
   ,(chararray)json#'options_table'                       AS options_table
-  ,(map[(pnum:chararray,pname:chararray)])json#'plugins' AS plugins_map
+  ,FLATTEN(json#'plugins')                               AS plugins_map
   ,(chararray)json#'theme'                               AS theme
   ,(chararray)json#'url'                                 AS url
   ,(chararray)json#'version'                             AS version
